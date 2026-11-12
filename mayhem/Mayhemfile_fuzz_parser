@@ -1,0 +1,10 @@
+project: savantenvs/oj
+target: fuzz_parser
+testsuite:
+  - https://$MAYHEM_DOMAIN/$MAYHEM_PROJECT/$MAYHEM_TARGET/testsuite.tar
+  - file://mayhem/fuzz_parser/testsuite
+cmds:
+  - cmd: /mayhem/fuzz_parser
+    libfuzzer: true
+    timeout: 30
+    dictionary: /mayhem/mayhem/fuzz_parser/fuzz_parser.dict
