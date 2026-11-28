@@ -96,7 +96,7 @@ static ROptTable encoder_ropts(Encoder e) {
     return e->own_ropts ? &e->ropts : NULL;
 }
 
-// The options an encoder encodes with. See encoder_new() for why an encoder
+// The options an encoder encodes with. See encoder_initialize() for why an encoder
 // built without options follows the defaults instead of holding a copy.
 static Options encoder_opts(Encoder e) {
     return e->own_opts ? &e->opts : &oj_default_options;
@@ -757,28 +757,35 @@ static const rb_data_type_t oj_encoder_type = {
     0,
 };
 
+static VALUE encoder_alloc(VALUE klass) {
+    Encoder e = OJ_R_ALLOC(struct _encoder);
+
+    memset(e, 0, sizeof(struct _encoder));
+    e->arg = Qnil;
+
+    return TypedData_Wrap_Struct(klass, &oj_encoder_type, e);
+}
+
 /* Document-method: new
  *	call-seq: new(options=nil)
  *
  * Creates a new Encoder.
  * - *options* [_Hash_] formatting options
  */
-static VALUE encoder_new(int argc, VALUE *argv, VALUE self) {
-    Encoder e = OJ_R_ALLOC(struct _encoder);
-    VALUE   arg;
-    VALUE   encoder;
+static VALUE encoder_initialize(int argc, VALUE *argv, VALUE self) {
+    Encoder e;
+    VALUE   arg = Qnil;
+    bool    own;
 
-    e->ropts.len   = 0;
-    e->ropts.alen  = 0;
-    e->ropts.table = NULL;
-    e->own_ropts   = false;
-
-    if (1 <= argc && Qnil != *argv) {
-        arg = *argv;
-    } else {
+    TypedData_Get_Struct(self, struct _encoder, &oj_encoder_type, e);
+    // An encode in progress uses the options, so they can not be replaced.
+    if (Qnil != e->arg) {
+        rb_raise(rb_eTypeError, "already initialized");
+    }
+    rb_scan_args(argc, argv, "01", &arg);
+    if (Qnil == arg) {
         arg = rb_hash_new();
     }
-    e->arg = arg;
     // An encoder given no options of its own reads oj_default_options at encode
     // time rather than copying it here. ActiveSupport keeps such an encoder for
     // the life of the process, so a copy taken now would freeze every later
@@ -789,24 +796,31 @@ static VALUE encoder_new(int argc, VALUE *argv, VALUE self) {
     // A hash counts as options only if at least one key names an option Oj
     // knows. Non-empty is not enough: ActiveSupport 8.1 caches a second encoder
     // built with {escape: false}, a key Oj has never had.
-    e->own_opts = T_HASH == rb_type(e->arg) && 0 < RHASH_SIZE(e->arg);
-    if (e->own_opts) {
-        e->opts     = oj_default_options;
-        e->own_opts = oj_parse_options_consumed(e->arg, &e->opts);
+    own = T_HASH == rb_type(arg) && 0 < RHASH_SIZE(arg);
+    if (own) {
+        e->opts = oj_default_options;
+        own     = oj_parse_options_consumed(arg, &e->opts);
     }
-    if (e->own_opts) {
+    if (own) {
         oj_options_take_ownership(&e->opts);
     } else {
         // Nothing to free: every option that allocates is reached through a
         // recognized key, and ownership is not taken until after that check.
         memset(&e->opts, 0, sizeof(e->opts));
     }
-    encoder = TypedData_Wrap_Struct(encoder_class, &oj_encoder_type, e);
-    // encoder_mark() cannot reach e->arg until e is wrapped, so a GC during
-    // the wrap would collect the hash made above.
-    RB_GC_GUARD(arg);
+    // Set only now. If the parse raises, opts may still share buffers with the
+    // defaults, so encoder_free() must not release them.
+    e->own_opts = own;
+    e->arg      = arg;
 
-    return encoder;
+    return self;
+}
+
+// The copy would be a new encoder without the options of the original.
+static VALUE encoder_initialize_copy(VALUE self, VALUE orig) {
+    rb_raise(rb_eTypeError, "can't copy %" PRIsVALUE, rb_obj_class(self));
+
+    return Qnil;
 }
 
 static VALUE resolve_classpath(const char *name) {
@@ -1096,16 +1110,15 @@ static VALUE encode(VALUE obj, ROptTable ropts, Options opts, int argc, VALUE *a
  */
 static VALUE encoder_encode(VALUE self, VALUE obj) {
     Encoder e;
+    VALUE   argv[1];
+
     TypedData_Get_Struct(self, struct _encoder, &oj_encoder_type, e);
+    // dump_as_json() hands each as_json a copy, so the encoder's own hash is
+    // never written into. An encoder that was allocated but not initialized
+    // passes an empty hash, as one made by new without options does.
+    argv[0] = Qnil == e->arg ? rb_hash_new() : e->arg;
 
-    if (Qnil != e->arg) {
-        // dump_as_json() hands each as_json a copy, so the encoder's own hash
-        // is never written into.
-        VALUE argv[1] = {e->arg};
-
-        return encode(obj, encoder_ropts(e), encoder_opts(e), 1, argv);
-    }
-    return encode(obj, encoder_ropts(e), encoder_opts(e), 0, NULL);
+    return encode(obj, encoder_ropts(e), encoder_opts(e), 1, argv);
 }
 
 /* Document-method: encode
@@ -1295,9 +1308,10 @@ void oj_mimic_rails_init(void) {
 
     encoder_class = rb_define_class_under(rails, "Encoder", rb_cObject);
     rb_gc_register_address(&encoder_class);
-    rb_undef_alloc_func(encoder_class);
+    rb_define_alloc_func(encoder_class, encoder_alloc);
+    rb_define_method(encoder_class, "initialize", encoder_initialize, -1);
+    rb_define_method(encoder_class, "initialize_copy", encoder_initialize_copy, 1);
 
-    rb_define_module_function(encoder_class, "new", encoder_new, -1);
     rb_define_module_function(rails, "optimize", rails_optimize, -1);
     rb_define_module_function(rails, "deoptimize", rails_deoptimize, -1);
     rb_define_module_function(rails, "optimized?", rails_optimized, 1);

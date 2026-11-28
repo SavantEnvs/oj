@@ -132,6 +132,60 @@ class RailsJuice < Minitest::Test
     end
   end
 
+  class EncoderSub < Oj::Rails::Encoder
+    attr_reader :tag
+
+    def initialize(*args)
+      super
+      @tag = :sub
+    end
+  end
+
+  def test_encoder_subclass
+    e = EncoderSub.new(indent: 2)
+    assert_instance_of(EncoderSub, e)
+    assert_equal(:sub, e.tag)
+    assert_equal(%({\n  "a":1\n}\n), e.encode({a: 1}))
+  end
+
+  def test_encoder_extra_arguments
+    assert_raises(ArgumentError) { Oj::Rails::Encoder.new({indent: 2}, :junk) }
+  end
+
+  def test_encoder_copy
+    assert_raises(TypeError) { Oj::Rails::Encoder.new(indent: 2).dup }
+  end
+
+  # The encoder is created before its options are parsed, so a bad option does
+  # not leak the encoder. Nothing is kept alive here so that a leak checker
+  # sees a leak.
+  def test_encoder_bad_option
+    assert_raises(ArgumentError) { Oj::Rails::Encoder.new(mode: :bogus) }
+  end
+
+  # An encode in progress uses the options, so initialize can not replace them.
+  def test_encoder_initialize_again
+    e = Oj::Rails::Encoder.new(only: ['a'])
+    assert_raises(TypeError) { e.send(:initialize, {}) }
+    assert_equal('{"a":1}', e.encode({a: 1, b: 2}))
+  end
+
+  class AsJsonArgs
+    def as_json(options)
+      {'options' => options.class.name}
+    end
+  end
+
+  class EncoderNoSuper < Oj::Rails::Encoder
+    def initialize(*); end
+  end
+
+  def test_encoder_not_initialized
+    assert_equal('{"options":"Hash"}', Oj::Rails::Encoder.new.encode(AsJsonArgs.new))
+    assert_equal('{"options":"Hash"}', Oj::Rails::Encoder.allocate.encode(AsJsonArgs.new))
+    assert_equal('{"options":"Hash"}', EncoderNoSuper.new.encode(AsJsonArgs.new))
+  end
+
   def test_encoder_empty_output_with_indent
     raw = Object.new
     raw.define_singleton_method(:raw_json) { |*| '' }
